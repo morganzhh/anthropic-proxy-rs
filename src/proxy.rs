@@ -66,7 +66,10 @@ async fn handle_non_streaming(
         req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
     }
 
-    let response = req_builder.send().await?;
+    let response = req_builder.send().await.map_err(|err| {
+        tracing::error!("Failed to send non-streaming request to {}: {:?}", url, err);
+        ProxyError::Http(err)
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -90,7 +93,7 @@ async fn handle_non_streaming(
         );
     }
 
-    let anthropic_resp = transform::openai_to_anthropic(openai_resp)?;
+    let anthropic_resp = transform::openai_to_anthropic(openai_resp, &openai_req.model)?;
 
     if config.verbose {
         tracing::trace!(
@@ -120,7 +123,10 @@ async fn handle_streaming(
         req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
     }
 
-    let response = req_builder.send().await?;
+    let response = req_builder.send().await.map_err(|err| {
+        tracing::error!("Failed to send streaming request to {}: {:?}", url, err);
+        ProxyError::Http(err)
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -136,7 +142,7 @@ async fn handle_streaming(
     }
 
     let stream = response.bytes_stream();
-    let sse_stream = create_sse_stream(stream);
+    let sse_stream = create_sse_stream(stream, openai_req.model.clone());
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -151,6 +157,7 @@ async fn handle_streaming(
 
 fn create_sse_stream(
     stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    fallback_model: String,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
@@ -191,20 +198,25 @@ fn create_sse_stream(
 
                                 if let Ok(chunk) = serde_json::from_str::<openai::StreamChunk>(data) {
                                     if message_id.is_none() {
-                                        message_id = Some(chunk.id.clone());
+                                        if let Some(id) = &chunk.id {
+                                            message_id = Some(id.clone());
+                                        }
                                     }
                                     if current_model.is_none() {
-                                        current_model = Some(chunk.model.clone());
+                                        if let Some(model) = &chunk.model {
+                                            current_model = Some(model.clone());
+                                        }
                                     }
 
                                     if let Some(choice) = chunk.choices.first() {
+
                                         if !has_sent_message_start {
                                             let event = anthropic::StreamEvent::MessageStart {
                                                 message: anthropic::MessageStartData {
-                                                    id: message_id.clone().unwrap_or_default(),
+                                                    id: message_id.clone().unwrap_or_else(|| "msg_proxy".to_string()),
                                                     message_type: "message".to_string(),
                                                     role: "assistant".to_string(),
-                                                    model: current_model.clone().unwrap_or_default(),
+                                                    model: current_model.clone().unwrap_or_else(|| fallback_model.clone()),
                                                     usage: anthropic::Usage {
                                                         input_tokens: 0,
                                                         output_tokens: 0,
@@ -380,6 +392,8 @@ fn create_sse_stream(
                                             yield Ok(Bytes::from(sse_data));
                                         }
                                     }
+                                } else {
+                                    tracing::debug!("Ignoring unrecognized upstream stream chunk: {}", data);
                                 }
                             }
                         }
