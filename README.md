@@ -27,6 +27,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 task local-install
 ```
 
+### Install with curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m0n0x41d/anthropic-proxy-rs/main/install.sh | bash
+```
+
+This installer uses `cargo install --git ... --locked` under the hood, so Rust/Cargo still needs to be present on the machine.
+
 # Run from anywhere
 ```bash
 UPSTREAM_BASE_URL=https://openrouter.ai/api \
