@@ -182,7 +182,10 @@ pub enum StreamEvent {
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
-    MessageDelta { delta: MessageDeltaData },
+    MessageDelta {
+        delta: MessageDeltaData,
+        usage: DeltaUsage,
+    },
     #[serde(rename = "message_stop")]
     MessageStop,
     #[serde(rename = "ping")]
@@ -228,8 +231,26 @@ pub enum Delta {
 pub struct MessageDeltaData {
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaUsage {
+    pub output_tokens: u32,
+}
+
+impl StreamEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::MessageStart { .. } => "message_start",
+            Self::ContentBlockStart { .. } => "content_block_start",
+            Self::ContentBlockDelta { .. } => "content_block_delta",
+            Self::ContentBlockStop { .. } => "content_block_stop",
+            Self::MessageDelta { .. } => "message_delta",
+            Self::MessageStop => "message_stop",
+            Self::Ping => "ping",
+            Self::Error { .. } => "error",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
