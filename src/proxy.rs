@@ -63,37 +63,50 @@ pub async fn list_models_handler(
     Extension(config): Extension<Arc<Config>>,
     Extension(client): Extension<Client>,
 ) -> ProxyResult<Response> {
-    let url = config.models_url();
-    tracing::debug!("Fetching models from {}", url);
+    let urls = config.models_urls();
+    let mut last_err = None;
 
-    let mut req_builder = client.get(&url).timeout(Duration::from_secs(60));
+    for url in &urls {
+        tracing::debug!("Fetching models from {}", url);
 
-    if let Some(api_key) = &config.api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        let mut req_builder = client.get(url).timeout(Duration::from_secs(60));
+        if let Some(api_key) = &config.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        match req_builder.send().await {
+            Ok(response) if response.status().is_success() => {
+                let openai_resp: openai::ModelsListResponse = response.json().await?;
+                let anthropic_resp = pipeline::translate_models_list(openai_resp);
+                return Ok(Json(anthropic_resp).into_response());
+            }
+            Ok(response) => {
+                let status = response.status();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                tracing::warn!("Upstream {} returned {}: {}", url, status, error_text);
+                if is_retriable_status(status.as_u16()) {
+                    last_err = Some(format!("Upstream returned {}: {}", status, error_text));
+                    continue;
+                }
+                return Err(ProxyError::Upstream(format!(
+                    "Upstream returned {}: {}",
+                    status, error_text
+                )));
+            }
+            Err(err) => {
+                tracing::warn!("Failed to reach {}: {:?}", url, err);
+                last_err = Some(format!("HTTP error: {}", err));
+                continue;
+            }
+        }
     }
 
-    let response = req_builder.send().await.map_err(|err| {
-        tracing::error!("Failed to fetch models from {}: {:?}", url, err);
-        ProxyError::Http(err)
-    })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        tracing::error!("Upstream models error ({}): {}", status, error_text);
-        return Err(ProxyError::Upstream(format!(
-            "Upstream returned {}: {}",
-            status, error_text
-        )));
-    }
-
-    let openai_resp: openai::ModelsListResponse = response.json().await?;
-    let anthropic_resp = pipeline::translate_models_list(openai_resp);
-
-    Ok(Json(anthropic_resp).into_response())
+    Err(ProxyError::Upstream(
+        last_err.unwrap_or_else(|| "All upstreams failed".to_string()),
+    ))
 }
 
 fn translation_policy(config: &Config) -> pipeline::TranslationPolicy {
@@ -105,71 +118,101 @@ fn translation_policy(config: &Config) -> pipeline::TranslationPolicy {
     }
 }
 
+fn is_retriable_status(status: u16) -> bool {
+    matches!(status, 429 | 500..=599)
+}
+
 async fn handle_non_streaming(
     config: Arc<Config>,
     client: Client,
     openai_req: openai::OpenAIRequest,
 ) -> ProxyResult<Response> {
-    let url = config.chat_completions_url();
-    tracing::debug!("Sending non-streaming request to {}", url);
-    tracing::debug!("Request model: {}", openai_req.model);
+    let urls = config.chat_completions_urls();
+    let mut last_err = None;
 
-    let mut req_builder = client
-        .post(&url)
-        .json(&openai_req)
-        .timeout(Duration::from_secs(300));
-
-    if let Some(api_key) = &config.api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
-    }
-
-    let upstream_start = Instant::now();
-    let response = req_builder.send().await.map_err(|err| {
-        tracing::error!("Failed to send non-streaming request to {}: {:?}", url, err);
-        metrics::upstream_error("chat_completions");
-        ProxyError::Http(err)
-    })?;
-    metrics::upstream_latency(upstream_start.elapsed().as_secs_f64(), "chat_completions");
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        tracing::error!("Upstream error ({}): {}", status, error_text);
-        metrics::upstream_error("chat_completions");
-        return Err(ProxyError::Upstream(format!(
-            "Upstream returned {}: {}",
-            status, error_text
-        )));
-    }
-
-    let openai_resp: openai::OpenAIResponse = response.json().await?;
-
-    metrics::tokens(
-        openai_resp.usage.prompt_tokens,
-        openai_resp.usage.completion_tokens,
-        &openai_req.model,
-    );
-
-    if config.verbose {
-        tracing::trace!(
-            "Received OpenAI response: {}",
-            serde_json::to_string_pretty(&openai_resp).unwrap_or_default()
+    for url in &urls {
+        tracing::debug!(
+            "Sending non-streaming request to {} (model: {})",
+            url,
+            openai_req.model
         );
-    }
 
-    let anthropic_resp = pipeline::translate_response(openai_resp, &openai_req.model)?;
+        let mut req_builder = client
+            .post(url)
+            .json(&openai_req)
+            .timeout(Duration::from_secs(300));
 
-    if config.verbose {
-        tracing::trace!(
-            "Transformed Anthropic response: {}",
-            serde_json::to_string_pretty(&anthropic_resp).unwrap_or_default()
+        if let Some(api_key) = &config.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let upstream_start = Instant::now();
+        let response = match req_builder.send().await {
+            Ok(resp) => {
+                metrics::upstream_latency(
+                    upstream_start.elapsed().as_secs_f64(),
+                    "chat_completions",
+                );
+                resp
+            }
+            Err(err) => {
+                tracing::warn!("Failed to reach {}: {:?}", url, err);
+                metrics::upstream_error("chat_completions");
+                last_err = Some(ProxyError::Http(err));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::warn!("Upstream {} returned {}: {}", url, status, error_text);
+            metrics::upstream_error("chat_completions");
+
+            if is_retriable_status(status.as_u16()) {
+                last_err = Some(ProxyError::Upstream(format!(
+                    "Upstream returned {}: {}",
+                    status, error_text
+                )));
+                continue;
+            }
+            return Err(ProxyError::Upstream(format!(
+                "Upstream returned {}: {}",
+                status, error_text
+            )));
+        }
+
+        let openai_resp: openai::OpenAIResponse = response.json().await?;
+
+        metrics::tokens(
+            openai_resp.usage.prompt_tokens,
+            openai_resp.usage.completion_tokens,
+            &openai_req.model,
         );
+
+        if config.verbose {
+            tracing::trace!(
+                "Received OpenAI response: {}",
+                serde_json::to_string_pretty(&openai_resp).unwrap_or_default()
+            );
+        }
+
+        let anthropic_resp = pipeline::translate_response(openai_resp, &openai_req.model)?;
+
+        if config.verbose {
+            tracing::trace!(
+                "Transformed Anthropic response: {}",
+                serde_json::to_string_pretty(&anthropic_resp).unwrap_or_default()
+            );
+        }
+
+        return Ok(Json(anthropic_resp).into_response());
     }
 
-    Ok(Json(anthropic_resp).into_response())
+    Err(last_err.unwrap_or_else(|| ProxyError::Upstream("All upstreams failed".to_string())))
 }
 
 async fn handle_streaming(
@@ -177,53 +220,79 @@ async fn handle_streaming(
     client: Client,
     openai_req: openai::OpenAIRequest,
 ) -> ProxyResult<Response> {
-    let url = config.chat_completions_url();
-    tracing::debug!("Sending streaming request to {}", url);
-    tracing::debug!("Request model: {}", openai_req.model);
+    let urls = config.chat_completions_urls();
+    let mut last_err = None;
 
-    let mut req_builder = client
-        .post(&url)
-        .json(&openai_req)
-        .timeout(Duration::from_secs(300));
+    for url in &urls {
+        tracing::debug!(
+            "Sending streaming request to {} (model: {})",
+            url,
+            openai_req.model
+        );
 
-    if let Some(api_key) = &config.api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        let mut req_builder = client
+            .post(url)
+            .json(&openai_req)
+            .timeout(Duration::from_secs(300));
+
+        if let Some(api_key) = &config.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let upstream_start = Instant::now();
+        let response = match req_builder.send().await {
+            Ok(resp) => {
+                metrics::upstream_latency(
+                    upstream_start.elapsed().as_secs_f64(),
+                    "chat_completions",
+                );
+                resp
+            }
+            Err(err) => {
+                tracing::warn!("Failed to reach {}: {:?}", url, err);
+                metrics::upstream_error("chat_completions");
+                last_err = Some(ProxyError::Http(err));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::warn!("Upstream {} returned {}: {}", url, status, error_text);
+            metrics::upstream_error("chat_completions");
+
+            if is_retriable_status(status.as_u16()) {
+                last_err = Some(ProxyError::Upstream(format!(
+                    "Upstream returned {}: {}",
+                    status, error_text
+                )));
+                continue;
+            }
+            return Err(ProxyError::Upstream(format!(
+                "Upstream returned {}: {}",
+                status, error_text
+            )));
+        }
+
+        let upstream = response.bytes_stream();
+        let sse_stream = create_sse_stream(upstream, openai_req.model.clone());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Content-Type",
+            HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+        headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+
+        return Ok((headers, Body::from_stream(sse_stream)).into_response());
     }
 
-    let upstream_start = Instant::now();
-    let response = req_builder.send().await.map_err(|err| {
-        tracing::error!("Failed to send streaming request to {}: {:?}", url, err);
-        metrics::upstream_error("chat_completions");
-        ProxyError::Http(err)
-    })?;
-    metrics::upstream_latency(upstream_start.elapsed().as_secs_f64(), "chat_completions");
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        tracing::error!("Upstream error ({}) from {}: {}", status, url, error_text);
-        metrics::upstream_error("chat_completions");
-        return Err(ProxyError::Upstream(format!(
-            "Upstream returned {} from {}: {}",
-            status, url, error_text
-        )));
-    }
-
-    let upstream = response.bytes_stream();
-    let sse_stream = create_sse_stream(upstream, openai_req.model.clone());
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "Content-Type",
-        HeaderValue::from_static("text/event-stream"),
-    );
-    headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
-    headers.insert("Connection", HeaderValue::from_static("keep-alive"));
-
-    Ok((headers, Body::from_stream(sse_stream)).into_response())
+    Err(last_err.unwrap_or_else(|| ProxyError::Upstream("All upstreams failed".to_string())))
 }
 
 fn serialize_event(event: &anthropic::StreamEvent) -> String {

@@ -113,10 +113,10 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
 
     tracing::info!("Starting Anthropic Proxy v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Port: {}", config.port);
-    tracing::info!("Upstream URL: {}", config.base_url);
+    tracing::info!("Upstream URLs: {}", config.upstream_urls.join("; "));
     tracing::info!(
-        "Resolved upstream chat completions URL: {}",
-        config.chat_completions_url()
+        "Resolved chat completions URLs: {}",
+        config.chat_completions_urls().join("; ")
     );
     if let Some(ref model) = config.reasoning_model {
         tracing::info!("Reasoning Model Override: {}", model);

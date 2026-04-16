@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, env, path::PathBuf};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
-    pub base_url: String,
+    pub upstream_urls: Vec<String>,
     pub api_key: Option<String>,
     pub model_map: BTreeMap<String, String>,
     pub system_prompt_ignore_terms: Vec<String>,
@@ -19,7 +19,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             port: 3000,
-            base_url: "http://localhost:11434".to_string(),
+            upstream_urls: vec!["http://localhost:11434".to_string()],
             api_key: None,
             model_map: BTreeMap::new(),
             system_prompt_ignore_terms: Vec::new(),
@@ -79,7 +79,7 @@ impl Config {
             .and_then(|p| p.parse().ok())
             .unwrap_or(3000);
 
-        let base_url = env::var("UPSTREAM_BASE_URL")
+        let raw_urls = env::var("UPSTREAM_BASE_URL")
             .or_else(|_| env::var("ANTHROPIC_PROXY_BASE_URL"))
             .map_err(|_| {
                 anyhow::anyhow!(
@@ -87,12 +87,12 @@ impl Config {
                 Examples:\n\
                   - OpenRouter: https://openrouter.ai/api\n\
                   - OpenAI: https://api.openai.com\n\
-                  - Versioned gateway: https://gateway.example.com/v2\n\
+                  - Multiple (failover): https://openrouter.ai/api;https://api.openai.com\n\
                   - Local: http://localhost:11434"
                 )
             })?;
 
-        Self::validate_base_url(&base_url)?;
+        let upstream_urls = Self::parse_upstream_urls(&raw_urls)?;
 
         let api_key = env::var("UPSTREAM_API_KEY")
             .or_else(|_| env::var("OPENROUTER_API_KEY"))
@@ -124,7 +124,7 @@ impl Config {
 
         Ok(Config {
             port,
-            base_url,
+            upstream_urls,
             api_key,
             model_map,
             system_prompt_ignore_terms,
@@ -135,18 +135,43 @@ impl Config {
         })
     }
 
-    pub fn chat_completions_url(&self) -> String {
-        Self::resolve_chat_completions_url(&self.base_url)
-            .expect("UPSTREAM_BASE_URL should be validated during configuration loading")
+    pub fn chat_completions_urls(&self) -> Vec<String> {
+        self.upstream_urls
+            .iter()
+            .map(|url| {
+                Self::resolve_chat_completions_url(url)
+                    .expect("URLs should be validated during configuration loading")
+            })
+            .collect()
     }
 
-    pub fn models_url(&self) -> String {
-        Self::resolve_models_url(&self.base_url)
-            .expect("UPSTREAM_BASE_URL should be validated during configuration loading")
+    pub fn models_urls(&self) -> Vec<String> {
+        self.upstream_urls
+            .iter()
+            .map(|url| {
+                Self::resolve_models_url(url)
+                    .expect("URLs should be validated during configuration loading")
+            })
+            .collect()
     }
 
-    fn validate_base_url(base_url: &str) -> Result<()> {
-        Self::resolve_chat_completions_url(base_url).map(|_| ())
+    fn parse_upstream_urls(raw: &str) -> Result<Vec<String>> {
+        let urls: Vec<String> = raw
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        if urls.is_empty() {
+            bail!("UPSTREAM_BASE_URL must not be empty");
+        }
+
+        for url in &urls {
+            Self::resolve_chat_completions_url(url)?;
+        }
+
+        Ok(urls)
     }
 
     fn resolve_chat_completions_url(base_url: &str) -> Result<String> {
@@ -479,5 +504,49 @@ mod tests {
         let err = Config::parse_model_map("claude-3-5-sonnet").unwrap_err();
 
         assert!(err.to_string().contains("Expected source=target"));
+    }
+
+    #[test]
+    fn parse_upstream_urls_splits_on_semicolons() {
+        let urls = Config::parse_upstream_urls("https://openrouter.ai/api;https://api.openai.com")
+            .unwrap();
+
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://openrouter.ai/api");
+        assert_eq!(urls[1], "https://api.openai.com");
+    }
+
+    #[test]
+    fn parse_upstream_urls_single_url_still_works() {
+        let urls = Config::parse_upstream_urls("https://api.openai.com").unwrap();
+        assert_eq!(urls.len(), 1);
+    }
+
+    #[test]
+    fn parse_upstream_urls_rejects_empty() {
+        let err = Config::parse_upstream_urls("").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn parse_upstream_urls_validates_each_url() {
+        let err = Config::parse_upstream_urls("https://api.openai.com;not-a-url").unwrap_err();
+        assert!(err.to_string().contains("valid http"));
+    }
+
+    #[test]
+    fn chat_completions_urls_resolves_all() {
+        let config = Config {
+            upstream_urls: vec![
+                "https://openrouter.ai/api".to_string(),
+                "https://api.openai.com".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let urls = config.chat_completions_urls();
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://openrouter.ai/api/v1/chat/completions");
+        assert_eq!(urls[1], "https://api.openai.com/v1/chat/completions");
     }
 }
