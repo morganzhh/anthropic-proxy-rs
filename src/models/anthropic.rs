@@ -70,9 +70,7 @@ pub enum ContentBlock {
         cache_control: Option<Value>,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -87,9 +85,7 @@ pub enum ContentBlock {
         is_error: Option<bool>,
     },
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +214,7 @@ pub enum ContentBlockStart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 pub enum Delta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },

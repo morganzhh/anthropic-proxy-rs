@@ -15,13 +15,27 @@ pub struct Config {
     pub verbose: bool,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            port: 3000,
+            base_url: "http://localhost:11434".to_string(),
+            api_key: None,
+            model_map: BTreeMap::new(),
+            system_prompt_ignore_terms: Vec::new(),
+            reasoning_model: None,
+            completion_model: None,
+            debug: false,
+            verbose: false,
+        }
+    }
+}
+
 impl Config {
     fn load_dotenv(custom_path: Option<PathBuf>) -> Option<PathBuf> {
         if let Some(path) = custom_path {
-            if path.exists() {
-                if let Ok(_) = dotenvy::from_path(&path) {
-                    return Some(path);
-                }
+            if path.exists() && dotenvy::from_path(&path).is_ok() {
+                return Some(path);
             }
             eprintln!(
                 "⚠️  WARNING: Custom config file not found: {}",
@@ -33,25 +47,22 @@ impl Config {
             return Some(path);
         }
 
-        if let Some(home) = env::var("HOME").ok() {
+        if let Ok(home) = env::var("HOME") {
             let home_config = PathBuf::from(home).join(".anthropic-proxy.env");
-            if home_config.exists() {
-                if let Ok(_) = dotenvy::from_path(&home_config) {
-                    return Some(home_config);
-                }
+            if home_config.exists() && dotenvy::from_path(&home_config).is_ok() {
+                return Some(home_config);
             }
         }
 
         let etc_config = PathBuf::from("/etc/anthropic-proxy/.env");
-        if etc_config.exists() {
-            if let Ok(_) = dotenvy::from_path(&etc_config) {
-                return Some(etc_config);
-            }
+        if etc_config.exists() && dotenvy::from_path(&etc_config).is_ok() {
+            return Some(etc_config);
         }
 
         None
     }
 
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
         Self::from_env_with_path(None)
     }
@@ -230,7 +241,7 @@ impl Config {
 
     pub fn parse_system_prompt_ignore_terms(value: &str) -> Vec<String> {
         value
-            .split(|ch| ch == ';' || ch == '\n')
+            .split([';', '\n'])
             .map(str::trim)
             .filter(|term| !term.is_empty())
             .map(ToOwned::to_owned)
@@ -258,7 +269,7 @@ impl Config {
         let mut model_map = BTreeMap::new();
 
         for entry in value
-            .split(|ch| ch == ';' || ch == '\n')
+            .split([';', '\n'])
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
         {
