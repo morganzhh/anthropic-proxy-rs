@@ -14,6 +14,7 @@ pub struct Config {
     pub completion_model: Option<String>,
     pub debug: bool,
     pub verbose: bool,
+    pub skip_ssl_verify: bool,
 }
 
 impl Default for Config {
@@ -29,6 +30,7 @@ impl Default for Config {
             completion_model: None,
             debug: false,
             verbose: false,
+            skip_ssl_verify: false,
         }
     }
 }
@@ -126,6 +128,10 @@ impl Config {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
+        let skip_ssl_verify = env::var("SKIP_SSL_VERIFY")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
         Ok(Config {
             port,
             host,
@@ -137,6 +143,7 @@ impl Config {
             completion_model,
             debug,
             verbose,
+            skip_ssl_verify,
         })
     }
 

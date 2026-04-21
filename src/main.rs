@@ -150,10 +150,16 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .connect_timeout(std::time::Duration::from_secs(10))
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .pool_max_idle_per_host(10)
-        .build()?;
+        .pool_max_idle_per_host(10);
+
+    let client = if config.skip_ssl_verify {
+        client
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()?
+    } else {
+        client.build()?
+    };
 
     let config = Arc::new(config);
 
