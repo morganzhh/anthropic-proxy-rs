@@ -150,6 +150,8 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .connect_timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .pool_max_idle_per_host(10)
         .build()?;
 
@@ -176,7 +178,8 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = format!("{}:{}",
+    config.host.as_deref().unwrap_or("127.0.0.1"), config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     tracing::info!("Listening on {}", addr);

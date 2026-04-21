@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, env, path::PathBuf};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
+    pub host: Option<String>,
     pub upstream_urls: Vec<String>,
     pub api_key: Option<String>,
     pub model_map: BTreeMap<String, String>,
@@ -19,6 +20,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             port: 3000,
+            host: Some("127.0.0.1".to_string()),
             upstream_urls: vec!["http://localhost:11434".to_string()],
             api_key: None,
             model_map: BTreeMap::new(),
@@ -74,6 +76,8 @@ impl Config {
             eprintln!("ℹ️  No .env file found, using environment variables only");
         }
 
+        let host = env::var("HOST").ok()
+                  .or(Some("127.0.0.1".to_string()));
         let port = env::var("PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -124,6 +128,7 @@ impl Config {
 
         Ok(Config {
             port,
+            host,
             upstream_urls,
             api_key,
             model_map,

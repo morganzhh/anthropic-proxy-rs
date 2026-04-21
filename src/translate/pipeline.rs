@@ -20,35 +20,28 @@ pub fn translate_request(
     let mut openai_messages = Vec::new();
 
     if let Some(system) = req.system {
-        match system {
-            anthropic::SystemPrompt::Single(text) => {
-                openai_messages.push(openai::Message {
-                    role: "system".to_string(),
-                    content: Some(openai::MessageContent::Text(sanitize_prompt(
-                        text,
-                        &policy.ignore_terms,
-                    ))),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                });
-            }
-            anthropic::SystemPrompt::Multiple(messages) => {
-                for msg in messages {
-                    openai_messages.push(openai::Message {
-                        role: "system".to_string(),
-                        content: Some(openai::MessageContent::Text(sanitize_prompt(
-                            msg.text,
-                            &policy.ignore_terms,
-                        ))),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    });
-                }
-            }
+    let merged = match system {
+        anthropic::SystemPrompt::Single(text) => {
+            sanitize_prompt(text, &policy.ignore_terms)
         }
-    }
+
+        anthropic::SystemPrompt::Multiple(messages) => {
+            messages
+                .into_iter()
+                .map(|m| sanitize_prompt(m.text, &policy.ignore_terms))
+                .collect::<Vec<_>>()
+                .join("\n")   // 👈 关键：合并
+        }
+    };
+
+    openai_messages.push(openai::Message {
+        role: "system".to_string(),
+        content: Some(openai::MessageContent::Text(merged)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    });
+}
 
     for msg in req.messages {
         openai_messages.extend(core::translate_message(msg)?);
